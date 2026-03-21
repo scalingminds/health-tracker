@@ -1,0 +1,1003 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Andy's Health Tracker</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { -webkit-tap-highlight-color: transparent; }
+    body { overscroll-behavior: none; }
+    input[type="range"] { -webkit-appearance: none; appearance: none; height: 8px; border-radius: 4px; background: #334155; outline: none; }
+    input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 24px; height: 24px; border-radius: 50%; background: #3b82f6; cursor: pointer; }
+    input[type="number"], input[type="text"], textarea, select { background: #1e293b; border: 1px solid #475569; color: white; border-radius: 8px; padding: 8px 12px; font-size: 14px; }
+    input[type="number"]:focus, input[type="text"]:focus, textarea:focus, select:focus { outline: none; border-color: #3b82f6; }
+    .tab-btn { transition: all 0.2s; }
+    .fade-in { animation: fadeIn 0.3s ease-in; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    @media print { .no-print { display: none !important; } .print-only { display: block !important; } }
+    .print-only { display: none; }
+  </style>
+</head>
+<body class="bg-slate-900 text-white">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useMemo } = React;
+
+    // ═══════════════════════════════════════════
+    // DATA LAYER — localStorage persistence
+    // ═══════════════════════════════════════════
+    const STORAGE_KEY = 'andy_health_tracker_v2';
+
+    function loadData() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) return JSON.parse(raw);
+      } catch(e) { console.warn('Load failed', e); }
+      return null;
+    }
+
+    function saveData(data) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      } catch(e) { console.warn('Save failed', e); }
+    }
+
+    function todayKey() {
+      return new Date().toISOString().slice(0, 10);
+    }
+
+    function emptyDay(dateStr) {
+      return {
+        date: dateStr,
+        weight: '',
+        glucose: [],
+        bp: [],
+        water: 0,
+        food: [],
+        sleep: { hours: '', deep: '', cpap: false },
+        substances: { alcohol: false, cannabis: false, lateSnack: false },
+        checks: {
+          morningWater: false, breakfast: false, amWalk: false, workout: false,
+          pmWalk: false, eveningWalk: false, windDown: false, cpap: false,
+        },
+        mood: '',
+        energy: '',
+        notes: '',
+      };
+    }
+
+    function getOrCreateDay(allDays, dateStr) {
+      if (allDays[dateStr]) return allDays[dateStr];
+      return emptyDay(dateStr);
+    }
+
+    // ═══════════════════════════════════════════
+    // PLAN CONFIG
+    // ═══════════════════════════════════════════
+    const PLAN_START = new Date('2026-01-20');
+
+    function getPlanInfo(dateObj) {
+      const dayOfPlan = Math.floor((dateObj - PLAN_START) / 86400000) + 1;
+      const phase = dayOfPlan <= 30 ? 1 : dayOfPlan <= 60 ? 2 : 3;
+      const dayInPhase = dayOfPlan <= 30 ? dayOfPlan : dayOfPlan <= 60 ? dayOfPlan - 30 : dayOfPlan - 60;
+      const weekInPhase = Math.ceil(dayInPhase / 7);
+      const pct = Math.min(100, (dayOfPlan / 90) * 100);
+      const day90 = new Date(PLAN_START); day90.setDate(day90.getDate() + 89);
+      const daysLeft = Math.max(0, Math.ceil((day90 - dateObj) / 86400000));
+      return { dayOfPlan, phase, dayInPhase, weekInPhase, pct, daysLeft };
+    }
+
+    // ═══════════════════════════════════════════
+    // STATIC DATA — workouts, food guide, labs, etc.
+    // ═══════════════════════════════════════════
+    const WORKOUTS = {
+      monday: { type: 'strength', title: 'Upper Push + Pull', time: '35 min', warmup: '5 min bike + arm circles + band pull-aparts', exercises: ['Landmine Press — 4×10','Incline DB Press — 3×10','Cable Rows — 4×12','Face Pulls — 3×15','Lateral Raise — 3×12','Tricep Pushdown — 3×12'], notes: 'Shoulder protocol: no overhead pressing. Landmine press is your go-to.' },
+      tuesday: { type: 'strength', title: 'Lower Body Strength', time: '35 min', warmup: '5 min bike + hip circles + bodyweight squats', exercises: ['Trap Bar Deadlift — 4×8','Bulgarian Split Squat — 3×10/side','Leg Press — 3×12','Hamstring Curls — 3×12','Calf Raises — 3×15'], notes: 'Big toe: skip split squats if it flares. Sub leg press.' },
+      wednesday: { type: 'cardio', title: 'Zone 2 Cardio + Core', time: '40 min', warmup: 'N/A — bike IS warmup', exercises: ['Bike — 30 min (HR 120-140)','Pallof Press — 3×10/side','Dead Bugs — 3×8/side','Side Planks — 3×20s/side'], notes: 'Zone 2 = can hold a conversation. LDL-lowering, brain-protecting session.' },
+      thursday: { type: 'strength', title: 'Upper Body Hypertrophy', time: '35 min', warmup: '5 min bike + band pull-aparts + shoulder circles', exercises: ['Floor Press — 4×10','Chest-Supported Row — 4×12','Arnold Press (light) — 3×12','Hammer Curls — 3×12','Overhead Tricep Ext — 3×12'], notes: 'Higher reps, controlled tempo. Muscle is your #1 glucose disposal site.' },
+      friday: { type: 'combo', title: 'Lower Body + Zone 2', time: '45 min', warmup: '5 min bike + hip openers', exercises: ['Goblet Squats — 3×12','RDLs — 3×10','Walking Lunges — 3×10/side','Then: 20 min bike (zone 2)'], notes: 'Resistance first, cardio after. Shorten lunge stride if foot bothers.' },
+      saturday: { type: 'cardio', title: 'Zone 2 Long Session', time: '40-45 min', warmup: 'Start slow, build to zone 2 in first 5 min', exercises: ['Bike or incline treadmill walk — 40-45 min (HR 120-140)'], notes: 'Longest cardio of the week. Podcast OK. This is brain health medicine.' },
+      sunday: { type: 'rest', title: 'Rest + Mobility', time: '20 min', warmup: '', exercises: ['Foam roll — full body','Hip 90/90 stretches','Thoracic spine extensions','Chin tucks + neck circles','Shoulder pass-throughs'], notes: 'Active rest. No alcohol tonight — set up Monday right.' },
+    };
+
+    const FOOD_GUIDE = {
+      eat: [
+        { food: 'Chicken/Turkey', note: 'Grilled, baked, air-fried' },
+        { food: 'Fish/Salmon', note: 'Wild caught 2-3x/week — brain food' },
+        { food: 'Eggs', note: '2-3/day fine, great breakfast protein' },
+        { food: 'Greek Yogurt', note: 'Plain, full fat, add berries' },
+        { food: 'All Vegetables', note: 'Load up, especially leafy greens' },
+        { food: 'Berries', note: 'Blueberries = #1 brain food' },
+        { food: 'Nuts/Seeds', note: 'Walnuts, almonds — limit to handful' },
+        { food: 'Avocado', note: 'Healthy fat, anti-inflammatory' },
+        { food: 'Olive Oil', note: 'Cook with it, drizzle on salads' },
+        { food: 'Beans/Lentils', note: 'Great fiber + protein combo' },
+      ],
+      limit: [
+        { food: 'Pasta', note: 'Half portion, always add protein' },
+        { food: 'Bread', note: 'Max 1 slice/day, whole grain only' },
+        { food: 'Rice', note: 'Small portion, try cauliflower rice' },
+        { food: 'Crackers', note: 'Swap for veggies or apple slices' },
+        { food: 'Cheese', note: 'OK in moderation, pair with protein' },
+        { food: 'Alcohol', note: 'Goal: 0. Kills deep sleep + spikes glucose' },
+        { food: 'Red Meat', note: '1-2x/week max, grass-fed preferred' },
+        { food: 'Potatoes', note: 'Small portions, sweet potato is better' },
+      ],
+      never: [
+        { food: 'Soda/Juice', note: 'Liquid sugar — worst for glucose' },
+        { food: 'Candy/Cookies', note: 'No nutritional value' },
+        { food: 'Fried Foods', note: 'Inflammatory, LDL destroyer' },
+        { food: 'White Bread', note: 'Pure glucose spike' },
+        { food: 'Sugary Cereal', note: 'Basically candy' },
+        { food: 'Ice Cream', note: 'Sugar + fat bomb, save for rare treat' },
+        { food: 'Energy Drinks', note: 'Cortisol + sugar spike' },
+        { food: 'Processed Meat', note: 'Hot dogs, bacon — inflammatory' },
+        { food: 'Mochi/Sweet Snacks', note: 'Pure sugar, 0 protein' },
+      ],
+      recipes: [
+        { name: 'Chicken Adobo', rating: 'great', note: 'Excellent protein ~35g. Cauliflower rice instead of white.' },
+        { name: 'City Works Salad', rating: 'great', note: 'Add grilled chicken. Anti-inflammatory winner.' },
+        { name: 'Asian Cucumber Salad', rating: 'great', note: 'Perfect side. Make this often.' },
+        { name: 'Grilled Chicken/Fish', rating: 'great', note: 'Your ideal dinner. Add roasted veggies.' },
+        { name: 'Roasted Butternut Squash', rating: 'good', note: 'Use half the maple syrup. Pair with protein.' },
+        { name: 'Energy Bites', rating: 'good', note: 'Add protein powder. Limit 2-3 at a time.' },
+        { name: 'Pasta Pomodoro', rating: 'modify', note: 'Half pasta, add chicken, big salad.' },
+        { name: 'Penne alla Vodka', rating: 'modify', note: 'Half pasta, add chicken. Once/week max.' },
+        { name: 'Grape Jelly Meatballs', rating: 'avoid', note: 'Party food only. 12g sugar per serving.' },
+        { name: 'GF Stuffing', rating: 'avoid', note: 'Holiday only. Bread + 3 sticks butter.' },
+      ],
+    };
+
+    const LABS = [
+      { cat: 'Blood Sugar', items: [
+        { name: 'Fasting Glucose', val: 117, range: '70-99', status: 'high', target: '<100' },
+        { name: 'HbA1c', val: '—', status: 'missing', note: 'NEEDS TESTING' },
+        { name: 'Fasting Insulin', val: '—', status: 'missing', note: 'NEEDS TESTING' },
+      ]},
+      { cat: 'Lipids', items: [
+        { name: 'Total Cholesterol', val: 225, range: '<200', status: 'high', target: '<200' },
+        { name: 'LDL', val: 152, range: '<130', status: 'high', target: '<100' },
+        { name: 'HDL', val: 55, range: '>40', status: 'good', target: '>50' },
+        { name: 'Triglycerides', val: 89, range: '<150', status: 'good' },
+      ]},
+      { cat: 'Kidney', items: [
+        { name: 'Creatinine', val: 1.31, range: '0.7-1.3', status: 'borderline' },
+        { name: 'eGFR', val: '>60', status: 'good' },
+      ]},
+      { cat: 'Inflammation', items: [
+        { name: 'Platelets', val: 371, range: '150-400', status: 'borderline' },
+        { name: 'hs-CRP', val: '—', status: 'missing', note: 'NEEDS TESTING' },
+      ]},
+      { cat: 'Hormones', items: [
+        { name: 'TSH', val: 1.88, status: 'good' },
+        { name: 'Testosterone', val: '—', status: 'missing', note: 'NEEDS TESTING' },
+        { name: 'Vitamin D', val: '—', status: 'missing', note: 'Supplementing but level unknown' },
+      ]},
+    ];
+
+    const MEDS = [
+      { name: 'Amlodipine 5mg', purpose: 'Blood pressure' },
+      { name: 'Sertraline 50mg', purpose: 'SSRI' },
+      { name: 'Bupropion 300mg ER', purpose: 'Antidepressant — take AM' },
+    ];
+
+    const SUPPLEMENTS = [
+      'Fish Oil 2-4g EPA/DHA', 'Vitamin D (verify level)', 'Magnesium Glycinate 400mg',
+      'Vitamin C 500-1000mg', 'L-Theanine 200mg', 'NMN',
+    ];
+
+    const MOTIVATIONS = [
+      "You're not trying to get healthy. You ARE healthy. Act like it.",
+      "CPAP every night. Training 4x/week. That's not a goal — that's who you are now.",
+      "Your mother's story doesn't have to be yours. Every rep protects your brain.",
+      "You teach CEOs about ownership. How's your ownership of your own health?",
+      "Identity and systems. You've proven you can do this. Now optimize.",
+      "Small hinges swing big doors. One good meal, one workout, one night of CPAP.",
+      "You're building the body that matches the mind you coach with.",
+    ];
+
+    const SPECIALISTS = [
+      { name: 'Coach Derek', focus: 'Fitness', emoji: '🏋️', prompts: ['What\'s my workout today?','My shoulder hurts','Zone 2 — how hard?'] },
+      { name: 'Dr. Santos', focus: 'Nutrition', emoji: '🥗', prompts: ['Is this meal good for glucose?','Restaurant strategy?','Enough protein?'] },
+      { name: 'Dr. Patel', focus: 'Sleep', emoji: '🌙', prompts: ['Wean off cannabis?','Deep sleep still low','CPAP uncomfortable'] },
+      { name: 'Dr. Mitchell', focus: 'Mindset', emoji: '🧠', prompts: ['Skipped workout — now what?','Feeling unmotivated','Identity shift help'] },
+      { name: 'Dr. Liu', focus: 'Medical', emoji: '🩺', prompts: ['What labs next?','Metformin?','Mom had Alzheimer\'s — my risk?'] },
+    ];
+
+    // ═══════════════════════════════════════════
+    // EXPORT HELPERS
+    // ═══════════════════════════════════════════
+    function exportCSV(allDays, range) {
+      const now = new Date();
+      let startDate;
+      if (range === 'today') {
+        startDate = new Date(now); startDate.setHours(0,0,0,0);
+      } else if (range === 'week') {
+        startDate = new Date(now); startDate.setDate(now.getDate() - 7);
+      } else {
+        startDate = new Date(now); startDate.setDate(now.getDate() - 30);
+      }
+
+      const headers = ['Date','Weight','Fasting Glucose','Avg Glucose','Systolic','Diastolic','Water (oz)','Sleep Hours','Deep Sleep','CPAP','Alcohol','Cannabis','Late Snack','Workout','Mood','Energy','Food Log','Notes'];
+      const rows = [headers.join(',')];
+
+      const dates = Object.keys(allDays).sort();
+      for (const d of dates) {
+        const dt = new Date(d + 'T12:00:00');
+        if (dt < startDate) continue;
+        const day = allDays[d];
+        const fastGluc = day.glucose.find(g => g.context === 'Fasting');
+        const avgGluc = day.glucose.length ? Math.round(day.glucose.reduce((s,g) => s + g.reading, 0) / day.glucose.length) : '';
+        const lastBp = day.bp.length ? day.bp[day.bp.length - 1] : {};
+        const foods = day.food.map(f => `${f.time}: ${f.entry}`).join(' | ');
+        rows.push([
+          d, day.weight, fastGluc ? fastGluc.reading : '', avgGluc,
+          lastBp.systolic || '', lastBp.diastolic || '', day.water,
+          day.sleep.hours, day.sleep.deep, day.sleep.cpap ? 'Yes' : 'No',
+          day.substances.alcohol ? 'Yes' : 'No', day.substances.cannabis ? 'Yes' : 'No',
+          day.substances.lateSnack ? 'Yes' : 'No',
+          day.checks.workout ? 'Yes' : 'No', day.mood, day.energy,
+          `"${foods}"`, `"${day.notes || ''}"`
+        ].join(','));
+      }
+
+      const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `health-export-${range}-${todayKey()}.csv`;
+      a.click(); URL.revokeObjectURL(url);
+    }
+
+    function exportJSON(allDays) {
+      const blob = new Blob([JSON.stringify(allDays, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `health-data-${todayKey()}.json`;
+      a.click(); URL.revokeObjectURL(url);
+    }
+
+    function exportDoctorReport(allDays) {
+      const days = Object.values(allDays).sort((a,b) => b.date.localeCompare(a.date));
+      const recent = days.slice(0, 30);
+      const weights = recent.filter(d => d.weight).map(d => Number(d.weight));
+      const glucoses = recent.flatMap(d => d.glucose.filter(g => g.context === 'Fasting').map(g => g.reading));
+      const bps = recent.flatMap(d => d.bp);
+      const workoutDays = recent.filter(d => d.checks.workout).length;
+      const alcDays = recent.filter(d => d.substances.alcohol).length;
+      const cpapDays = recent.filter(d => d.sleep.cpap).length;
+
+      let report = `PATIENT HEALTH REPORT — Andy Hite\n`;
+      report += `Generated: ${new Date().toLocaleDateString()}\n`;
+      report += `Report Period: Last ${recent.length} days\n`;
+      report += `═══════════════════════════════════════════\n\n`;
+      report += `CURRENT MEDICATIONS\n`;
+      MEDS.forEach(m => report += `  • ${m.name} — ${m.purpose}\n`);
+      report += `\nSUPPLEMENTS: ${SUPPLEMENTS.join(', ')}\n`;
+      report += `\n──────────────────────────────────────\n`;
+      report += `VITALS SUMMARY (${recent.length}-day averages)\n\n`;
+      report += `  Weight: ${weights.length ? (weights.reduce((a,b)=>a+b,0)/weights.length).toFixed(1) : 'No data'} lbs`;
+      report += weights.length >= 2 ? ` (trend: ${weights[0] > weights[weights.length-1] ? '↑' : '↓'} ${Math.abs(weights[0]-weights[weights.length-1]).toFixed(1)} lbs)\n` : '\n';
+      report += `  Fasting Glucose: ${glucoses.length ? Math.round(glucoses.reduce((a,b)=>a+b,0)/glucoses.length) : 'No data'} mg/dL`;
+      report += glucoses.length ? ` (range: ${Math.min(...glucoses)}-${Math.max(...glucoses)})\n` : '\n';
+      if (bps.length) {
+        const avgSys = Math.round(bps.reduce((s,b)=>s+b.systolic,0)/bps.length);
+        const avgDia = Math.round(bps.reduce((s,b)=>s+b.diastolic,0)/bps.length);
+        report += `  Blood Pressure: ${avgSys}/${avgDia} mmHg\n`;
+      }
+      report += `\n──────────────────────────────────────\n`;
+      report += `LIFESTYLE COMPLIANCE\n\n`;
+      report += `  Workouts: ${workoutDays}/${recent.length} days (${Math.round(workoutDays/recent.length*100)}%)\n`;
+      report += `  CPAP: ${cpapDays}/${recent.length} nights (${Math.round(cpapDays/recent.length*100)}%)\n`;
+      report += `  Alcohol: ${alcDays}/${recent.length} days\n`;
+      report += `\n──────────────────────────────────────\n`;
+      report += `LABS NEEDING RETEST\n\n`;
+      report += `  • HbA1c (baseline unknown)\n`;
+      report += `  • Fasting Insulin\n`;
+      report += `  • hs-CRP\n`;
+      report += `  • Testosterone\n`;
+      report += `  • Vitamin D level\n`;
+      report += `  • Full lipid panel\n`;
+      report += `  • Comprehensive metabolic panel\n`;
+
+      const blob = new Blob([report], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `doctor-report-${todayKey()}.txt`;
+      a.click(); URL.revokeObjectURL(url);
+    }
+
+    // ═══════════════════════════════════════════
+    // MAIN APP
+    // ═══════════════════════════════════════════
+    const App = () => {
+      const [allDays, setAllDays] = useState(() => {
+        const saved = loadData();
+        if (saved && saved.days) return saved.days;
+        return {};
+      });
+      const [currentDate, setCurrentDate] = useState(todayKey());
+      const [activeTab, setActiveTab] = useState('today');
+      const [showSync, setShowSync] = useState(false);
+      const [syncText, setSyncText] = useState('');
+      const [toast, setToast] = useState('');
+
+      // Current day data
+      const day = useMemo(() => getOrCreateDay(allDays, currentDate), [allDays, currentDate]);
+
+      // Save whenever allDays changes
+      useEffect(() => {
+        saveData({ days: allDays, lastSync: new Date().toISOString() });
+      }, [allDays]);
+
+      // Auto-show toast
+      useEffect(() => {
+        if (toast) {
+          const t = setTimeout(() => setToast(''), 2000);
+          return () => clearTimeout(t);
+        }
+      }, [toast]);
+
+      const updateDay = useCallback((dateStr, updater) => {
+        setAllDays(prev => {
+          const existing = prev[dateStr] || emptyDay(dateStr);
+          const updated = typeof updater === 'function' ? updater(existing) : { ...existing, ...updater };
+          return { ...prev, [dateStr]: updated };
+        });
+      }, []);
+
+      const dateObj = new Date(currentDate + 'T12:00:00');
+      const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
+      const dateDisplay = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      const isToday = currentDate === todayKey();
+      const plan = getPlanInfo(dateObj);
+      const phaseNames = { 1: 'Foundation', 2: 'Acceleration', 3: 'Optimization' };
+      const phaseColors = { 1: 'from-blue-600 to-blue-500', 2: 'from-emerald-600 to-emerald-500', 3: 'from-purple-600 to-purple-500' };
+      const motivation = MOTIVATIONS[plan.dayOfPlan % MOTIVATIONS.length];
+      const todayWorkout = WORKOUTS[dayName.toLowerCase()] || WORKOUTS.sunday;
+      const typeColors = { strength: 'text-blue-400 bg-blue-900/40', cardio: 'text-green-400 bg-green-900/40', combo: 'text-purple-400 bg-purple-900/40', rest: 'text-slate-400 bg-slate-700/40' };
+
+      // Navigation
+      const prevDay = () => { const d = new Date(dateObj); d.setDate(d.getDate()-1); setCurrentDate(d.toISOString().slice(0,10)); };
+      const nextDay = () => { const d = new Date(dateObj); d.setDate(d.getDate()+1); if (d <= new Date()) setCurrentDate(d.toISOString().slice(0,10)); };
+      const goToday = () => setCurrentDate(todayKey());
+
+      // Completion %
+      const completionPct = Math.round(Object.values(day.checks).filter(Boolean).length / Object.keys(day.checks).length * 100);
+
+      // Stats for history
+      const allDates = useMemo(() => Object.keys(allDays).sort().reverse(), [allDays]);
+      const last7 = useMemo(() => {
+        const dates = [];
+        for (let i = 0; i < 7; i++) {
+          const d = new Date(); d.setDate(d.getDate() - i);
+          dates.push(d.toISOString().slice(0,10));
+        }
+        return dates.reverse().map(d => allDays[d] || emptyDay(d));
+      }, [allDays]);
+
+      const tabs = [
+        { id: 'today', label: 'Today', emoji: '☀️' },
+        { id: 'log', label: 'Log', emoji: '📝' },
+        { id: 'history', label: 'History', emoji: '📊' },
+        { id: 'food', label: 'Food', emoji: '🍽️' },
+        { id: 'labs', label: 'Labs', emoji: '🔬' },
+        { id: 'export', label: 'Export', emoji: '📤' },
+      ];
+
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white pb-20">
+          <div className="max-w-lg mx-auto px-3 py-4">
+
+            {/* TOAST */}
+            {toast && (
+              <div className="fixed top-4 left-1/2 -translate-x-1/2 bg-emerald-600 text-white px-4 py-2 rounded-lg shadow-lg z-50 text-sm fade-in">
+                {toast}
+              </div>
+            )}
+
+            {/* HEADER */}
+            <div className="mb-3">
+              <div className="flex items-center justify-between mb-1">
+                <h1 className="text-xl font-bold">Health Tracker</h1>
+                <div className="flex items-center gap-2">
+                  <button onClick={prevDay} className="text-slate-400 hover:text-white px-2 py-1 text-lg">&lt;</button>
+                  <button onClick={goToday} className={`text-xs px-2 py-1 rounded ${isToday ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-300'}`}>Today</button>
+                  <button onClick={nextDay} className="text-slate-400 hover:text-white px-2 py-1 text-lg">&gt;</button>
+                </div>
+              </div>
+              <p className="text-sm text-slate-400">{dayName}, {dateDisplay}</p>
+              <div className="flex items-center justify-between mt-2">
+                <p className="text-xs text-slate-500">Phase {plan.phase}: {phaseNames[plan.phase]} — Day {plan.dayOfPlan}/90</p>
+                <p className="text-xs text-slate-500">{plan.daysLeft}d left</p>
+              </div>
+              <div className="w-full bg-slate-700 rounded-full h-1.5 mt-1">
+                <div className={`bg-gradient-to-r ${phaseColors[plan.phase]} h-1.5 rounded-full`} style={{width:`${plan.pct}%`}}></div>
+              </div>
+            </div>
+
+            {/* TAB NAV */}
+            <div className="flex overflow-x-auto gap-1.5 mb-4 pb-1 no-print">
+              {tabs.map(t => (
+                <button key={t.id} onClick={() => setActiveTab(t.id)}
+                  className={`tab-btn px-3 py-1.5 rounded-lg text-xs whitespace-nowrap ${activeTab === t.id ? 'bg-blue-600 text-white' : 'bg-slate-700/50 text-slate-400'}`}>
+                  {t.emoji} {t.label}
+                </button>
+              ))}
+            </div>
+
+            {/* ═══ TODAY TAB ═══ */}
+            {activeTab === 'today' && (
+              <div className="space-y-3 fade-in">
+                {/* Motivation */}
+                <div className="p-3 border border-orange-700/30 bg-orange-900/10 rounded-lg">
+                  <p className="text-sm italic text-orange-200">🧠 "{motivation}"</p>
+                </div>
+
+                {/* Today's Workout */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg">🏋️</span>
+                      <span className="font-bold text-sm">{todayWorkout.title}</span>
+                      <span className={`text-[10px] px-2 py-0.5 rounded ${typeColors[todayWorkout.type]}`}>{todayWorkout.type}</span>
+                    </div>
+                    <span className="text-xs text-slate-400">{todayWorkout.time}</span>
+                  </div>
+                  {todayWorkout.warmup && <p className="text-xs text-slate-500 mb-2">Warmup: {todayWorkout.warmup}</p>}
+                  <div className="space-y-1">
+                    {todayWorkout.exercises.map((e,i) => (
+                      <div key={i} className="flex items-center gap-2 text-xs text-slate-300">
+                        <span className="text-slate-600">•</span> {e}
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-xs text-slate-500 italic mt-2">{todayWorkout.notes}</p>
+                  <label className="flex items-center gap-2 mt-3 cursor-pointer">
+                    <input type="checkbox" checked={day.checks.workout}
+                      onChange={() => updateDay(currentDate, d => ({...d, checks: {...d.checks, workout: !d.checks.workout}}))}
+                      className="w-5 h-5 rounded" />
+                    <span className="text-sm font-bold text-emerald-400">Mark Workout Complete</span>
+                  </label>
+                </div>
+
+                {/* Quick Stats Row */}
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="p-2 rounded-lg border border-blue-700/30 bg-blue-900/10 text-center">
+                    <p className="text-lg font-bold">{day.water}</p>
+                    <p className="text-[10px] text-slate-400">oz water</p>
+                  </div>
+                  <div className="p-2 rounded-lg border border-emerald-700/30 bg-emerald-900/10 text-center">
+                    <p className="text-lg font-bold">{completionPct}%</p>
+                    <p className="text-[10px] text-slate-400">checklist</p>
+                  </div>
+                  <div className="p-2 rounded-lg border border-purple-700/30 bg-purple-900/10 text-center">
+                    <p className="text-lg font-bold">{day.food.length}</p>
+                    <p className="text-[10px] text-slate-400">meals logged</p>
+                  </div>
+                </div>
+
+                {/* Checklist */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <h3 className="font-bold text-sm mb-2">Daily Checklist</h3>
+                  <div className="grid grid-cols-2 gap-1">
+                    {Object.entries(day.checks).map(([k, v]) => (
+                      <label key={k} className="flex items-center gap-2 cursor-pointer text-xs py-1">
+                        <input type="checkbox" checked={v}
+                          onChange={() => updateDay(currentDate, d => ({...d, checks: {...d.checks, [k]: !d.checks[k]}}))}
+                          className="w-4 h-4" />
+                        <span className={v ? 'text-emerald-400' : 'text-slate-400'}>{k.replace(/([A-Z])/g, ' $1').trim()}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Substances */}
+                <div className="p-3 rounded-lg border border-red-700/30 bg-red-900/10">
+                  <h3 className="font-bold text-sm mb-2">Substances</h3>
+                  <div className="flex gap-4">
+                    {Object.entries(day.substances).map(([k, v]) => (
+                      <label key={k} className="flex items-center gap-2 cursor-pointer text-xs">
+                        <input type="checkbox" checked={v}
+                          onChange={() => updateDay(currentDate, d => ({...d, substances: {...d.substances, [k]: !d.substances[k]}}))}
+                          className="w-4 h-4" />
+                        <span>{k.replace(/([A-Z])/g, ' $1').trim()}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Team reminder */}
+                <div className="p-3 rounded-lg border border-slate-600/30 bg-slate-800/30 text-center">
+                  <p className="text-xs text-slate-400">Your health team lives in Cowork. Open the app and ask them anything.</p>
+                  <div className="flex flex-wrap justify-center gap-2 mt-2">
+                    {SPECIALISTS.map(s => (
+                      <span key={s.name} className="text-[10px] bg-slate-700/50 px-2 py-1 rounded">{s.emoji} {s.name}</span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ═══ LOG TAB ═══ */}
+            {activeTab === 'log' && (
+              <div className="space-y-3 fade-in">
+                <h2 className="font-bold">Log for {dateDisplay}</h2>
+
+                {/* Weight */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <label className="text-xs text-slate-400 block mb-1">Weight (lbs)</label>
+                  <input type="number" value={day.weight} placeholder="186"
+                    onChange={e => updateDay(currentDate, { ...day, weight: e.target.value })}
+                    className="w-full" />
+                </div>
+
+                {/* Water */}
+                <div className="p-3 rounded-lg border border-blue-700/30 bg-blue-900/10">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-bold">💧 Water</span>
+                    <span className="text-lg font-bold">{day.water}oz</span>
+                  </div>
+                  <input type="range" min="0" max="120" value={day.water}
+                    onChange={e => updateDay(currentDate, { ...day, water: Number(e.target.value) })}
+                    className="w-full" />
+                  <p className="text-xs text-slate-500 mt-1">Goal: 80oz</p>
+                </div>
+
+                {/* Glucose */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <h3 className="text-sm font-bold mb-2">💧 Glucose</h3>
+                  {day.glucose.map((g, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs py-1 border-b border-slate-700/50">
+                      <span>{g.time} — {g.context}</span>
+                      <span className={g.reading > 140 ? 'text-red-400 font-bold' : g.reading > 99 ? 'text-yellow-400 font-bold' : 'text-emerald-400 font-bold'}>{g.reading}</span>
+                    </div>
+                  ))}
+                  <div className="flex gap-2 mt-2">
+                    <input type="number" placeholder="mg/dL" className="flex-1"
+                      id="glucose-input" />
+                    <select className="w-28" id="glucose-context">
+                      <option>Fasting</option><option>Pre-meal</option><option>Post-meal</option><option>Bedtime</option>
+                    </select>
+                    <button onClick={() => {
+                      const val = document.getElementById('glucose-input').value;
+                      const ctx = document.getElementById('glucose-context').value;
+                      if (!val) return;
+                      const time = new Date().toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit'});
+                      updateDay(currentDate, d => ({...d, glucose: [...d.glucose, {time, reading: Number(val), context: ctx}]}));
+                      document.getElementById('glucose-input').value = '';
+                      setToast('Glucose logged');
+                    }} className="bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 rounded-lg">+</button>
+                  </div>
+                </div>
+
+                {/* BP */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <h3 className="text-sm font-bold mb-2">❤️ Blood Pressure</h3>
+                  {day.bp.map((b, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs py-1 border-b border-slate-700/50">
+                      <span>{b.time} — {b.context}</span>
+                      <span className={b.systolic > 140 ? 'text-red-400 font-bold' : b.systolic > 130 ? 'text-yellow-400 font-bold' : 'text-emerald-400 font-bold'}>{b.systolic}/{b.diastolic}</span>
+                    </div>
+                  ))}
+                  <div className="flex gap-2 mt-2">
+                    <input type="number" placeholder="Sys" className="w-16" id="bp-sys" />
+                    <input type="number" placeholder="Dia" className="w-16" id="bp-dia" />
+                    <select className="flex-1" id="bp-context">
+                      <option>Morning</option><option>Afternoon</option><option>Evening</option>
+                    </select>
+                    <button onClick={() => {
+                      const s = document.getElementById('bp-sys').value;
+                      const d = document.getElementById('bp-dia').value;
+                      const c = document.getElementById('bp-context').value;
+                      if (!s || !d) return;
+                      const time = new Date().toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit'});
+                      updateDay(currentDate, day => ({...day, bp: [...day.bp, {time, systolic:Number(s), diastolic:Number(d), context:c}]}));
+                      document.getElementById('bp-sys').value = '';
+                      document.getElementById('bp-dia').value = '';
+                      setToast('BP logged');
+                    }} className="bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 rounded-lg">+</button>
+                  </div>
+                </div>
+
+                {/* Food Log */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <h3 className="text-sm font-bold mb-2">🍽️ Food Log</h3>
+                  {day.food.map((f, i) => (
+                    <div key={i} className="text-xs py-1 border-b border-slate-700/50">
+                      <span className="text-slate-500">{f.time}</span> <span className="text-blue-400">[{f.meal}]</span> {f.entry}
+                    </div>
+                  ))}
+                  <div className="space-y-2 mt-2">
+                    <div className="flex gap-2">
+                      <select className="w-24" id="food-meal">
+                        <option>Breakfast</option><option>Snack</option><option>Lunch</option><option>Dinner</option><option>Late Night</option>
+                      </select>
+                      <input type="text" placeholder="What did you eat?" className="flex-1" id="food-input"
+                        onKeyDown={e => { if (e.key === 'Enter') document.getElementById('food-add-btn').click(); }} />
+                      <button id="food-add-btn" onClick={() => {
+                        const entry = document.getElementById('food-input').value;
+                        const meal = document.getElementById('food-meal').value;
+                        if (!entry.trim()) return;
+                        const time = new Date().toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit'});
+                        updateDay(currentDate, d => ({...d, food: [...d.food, {time, meal, entry}]}));
+                        document.getElementById('food-input').value = '';
+                        setToast('Food logged');
+                      }} className="bg-blue-600 hover:bg-blue-700 text-white text-xs px-3 rounded-lg">+</button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Sleep */}
+                <div className="p-3 rounded-lg border border-purple-700/30 bg-purple-900/10">
+                  <h3 className="text-sm font-bold mb-2">🌙 Sleep</h3>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="text-[10px] text-slate-400">Hours</label>
+                      <input type="number" step="0.5" value={day.sleep.hours} placeholder="6.5"
+                        onChange={e => updateDay(currentDate, d => ({...d, sleep: {...d.sleep, hours: e.target.value}}))}
+                        className="w-full" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-slate-400">Deep (min)</label>
+                      <input type="number" value={day.sleep.deep} placeholder="48"
+                        onChange={e => updateDay(currentDate, d => ({...d, sleep: {...d.sleep, deep: e.target.value}}))}
+                        className="w-full" />
+                    </div>
+                    <div className="flex items-end">
+                      <label className="flex items-center gap-2 cursor-pointer text-xs">
+                        <input type="checkbox" checked={day.sleep.cpap}
+                          onChange={() => updateDay(currentDate, d => ({...d, sleep: {...d.sleep, cpap: !d.sleep.cpap}}))}
+                          className="w-5 h-5" />
+                        CPAP
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Mood / Energy / Notes */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <div>
+                      <label className="text-[10px] text-slate-400">Mood (1-5)</label>
+                      <select value={day.mood} onChange={e => updateDay(currentDate, {...day, mood: e.target.value})} className="w-full">
+                        <option value="">—</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-slate-400">Energy (1-5)</label>
+                      <select value={day.energy} onChange={e => updateDay(currentDate, {...day, energy: e.target.value})} className="w-full">
+                        <option value="">—</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option>
+                      </select>
+                    </div>
+                  </div>
+                  <label className="text-[10px] text-slate-400">Notes</label>
+                  <textarea rows="2" value={day.notes || ''} placeholder="How are you feeling?"
+                    onChange={e => updateDay(currentDate, {...day, notes: e.target.value})}
+                    className="w-full" />
+                </div>
+              </div>
+            )}
+
+            {/* ═══ HISTORY TAB ═══ */}
+            {activeTab === 'history' && (
+              <div className="space-y-3 fade-in">
+                <h2 className="font-bold">7-Day Trends</h2>
+
+                {/* Glucose Trend */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <h3 className="text-sm font-bold mb-2">💧 Fasting Glucose</h3>
+                  <div className="flex items-end gap-1 h-24">
+                    {last7.map((d, i) => {
+                      const fastG = d.glucose.find(g => g.context === 'Fasting');
+                      const val = fastG ? fastG.reading : 0;
+                      const pct = val ? Math.max(10, ((val - 70) / 80) * 100) : 0;
+                      const color = val > 125 ? 'bg-red-500' : val > 99 ? 'bg-yellow-500' : val ? 'bg-emerald-500' : 'bg-slate-700';
+                      return (
+                        <div key={i} className="flex-1 flex flex-col items-center">
+                          <span className="text-[9px] text-slate-400 mb-1">{val || '—'}</span>
+                          <div className={`w-full rounded-t ${color}`} style={{height: `${pct}%`}}></div>
+                          <span className="text-[9px] text-slate-500 mt-1">{d.date.slice(5)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="flex justify-between text-[9px] text-slate-600 mt-1">
+                    <span>Target: &lt;100</span><span>Prediabetic: 100-125</span>
+                  </div>
+                </div>
+
+                {/* Weight Trend */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <h3 className="text-sm font-bold mb-2">📉 Weight</h3>
+                  <div className="flex items-end gap-1 h-20">
+                    {last7.map((d, i) => {
+                      const w = d.weight ? Number(d.weight) : 0;
+                      const pct = w ? Math.max(10, ((w - 160) / 40) * 100) : 0;
+                      return (
+                        <div key={i} className="flex-1 flex flex-col items-center">
+                          <span className="text-[9px] text-slate-400 mb-1">{w || '—'}</span>
+                          <div className="w-full rounded-t bg-blue-500" style={{height: w ? `${pct}%` : '0%'}}></div>
+                          <span className="text-[9px] text-slate-500 mt-1">{d.date.slice(5)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Compliance */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <h3 className="text-sm font-bold mb-2">Weekly Compliance</h3>
+                  <div className="space-y-2">
+                    {[
+                      { label: 'Workouts', count: last7.filter(d => d.checks.workout).length, goal: 5, emoji: '🏋️' },
+                      { label: 'CPAP', count: last7.filter(d => d.sleep.cpap).length, goal: 7, emoji: '😴' },
+                      { label: 'Water 80oz+', count: last7.filter(d => d.water >= 80).length, goal: 7, emoji: '💧' },
+                      { label: 'Substance-free', count: last7.filter(d => !d.substances.alcohol && !d.substances.cannabis).length, goal: 7, emoji: '🛡️' },
+                    ].map((item, i) => (
+                      <div key={i}>
+                        <div className="flex justify-between text-xs mb-1">
+                          <span>{item.emoji} {item.label}</span>
+                          <span className="text-slate-400">{item.count}/{item.goal}</span>
+                        </div>
+                        <div className="w-full bg-slate-700 rounded-full h-2">
+                          <div className={`h-2 rounded-full ${item.count >= item.goal ? 'bg-emerald-500' : item.count >= item.goal * 0.7 ? 'bg-yellow-500' : 'bg-red-500'}`}
+                            style={{width: `${(item.count / item.goal) * 100}%`}}></div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Day-by-day log */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <h3 className="text-sm font-bold mb-2">Recent Entries</h3>
+                  {allDates.slice(0, 14).map(d => {
+                    const entry = allDays[d];
+                    const hasData = entry.weight || entry.glucose.length || entry.food.length || Object.values(entry.checks).some(Boolean);
+                    if (!hasData) return null;
+                    return (
+                      <button key={d} onClick={() => { setCurrentDate(d); setActiveTab('log'); }}
+                        className="w-full text-left flex items-center justify-between py-2 border-b border-slate-700/50 hover:bg-slate-700/30 px-1 rounded text-xs">
+                        <span className="text-slate-300">{new Date(d+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}</span>
+                        <div className="flex items-center gap-2 text-slate-500">
+                          {entry.weight && <span>{entry.weight}lb</span>}
+                          {entry.glucose.length > 0 && <span>🩸{entry.glucose[0].reading}</span>}
+                          {entry.checks.workout && <span>✅</span>}
+                          {entry.sleep.cpap && <span>😴</span>}
+                          {entry.substances.alcohol && <span>🍷</span>}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* ═══ FOOD TAB ═══ */}
+            {activeTab === 'food' && (
+              <div className="space-y-3 fade-in">
+                <h2 className="font-bold">Food Guide</h2>
+
+                {/* The Rule */}
+                <div className="p-3 rounded-lg border border-emerald-700/30 bg-emerald-900/10">
+                  <h3 className="font-bold text-sm text-emerald-400 mb-1">THE RULE</h3>
+                  <p className="text-xs text-slate-300">Every meal = Protein + Fiber + Healthy Fat. If it doesn't have all 3, fix it before you eat it.</p>
+                </div>
+
+                {/* Eat Freely */}
+                <div className="p-3 rounded-lg border border-emerald-700/30 bg-slate-800/50">
+                  <h3 className="font-bold text-sm text-emerald-400 mb-2">✅ Eat Freely</h3>
+                  {FOOD_GUIDE.eat.map((f,i) => (
+                    <div key={i} className="flex justify-between text-xs py-1 border-b border-slate-700/30">
+                      <span className="text-slate-200 font-medium">{f.food}</span>
+                      <span className="text-slate-500">{f.note}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Limit */}
+                <div className="p-3 rounded-lg border border-yellow-700/30 bg-slate-800/50">
+                  <h3 className="font-bold text-sm text-yellow-400 mb-2">⚠️ Limit</h3>
+                  {FOOD_GUIDE.limit.map((f,i) => (
+                    <div key={i} className="flex justify-between text-xs py-1 border-b border-slate-700/30">
+                      <span className="text-slate-200 font-medium">{f.food}</span>
+                      <span className="text-slate-500">{f.note}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Never */}
+                <div className="p-3 rounded-lg border border-red-700/30 bg-slate-800/50">
+                  <h3 className="font-bold text-sm text-red-400 mb-2">🚫 Never</h3>
+                  {FOOD_GUIDE.never.map((f,i) => (
+                    <div key={i} className="flex justify-between text-xs py-1 border-b border-slate-700/30">
+                      <span className="text-slate-200 font-medium">{f.food}</span>
+                      <span className="text-slate-500">{f.note}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Wife's Recipes */}
+                <div className="p-3 rounded-lg border border-purple-700/30 bg-slate-800/50">
+                  <h3 className="font-bold text-sm text-purple-400 mb-2">👩‍🍳 Wife's Recipes — Rated</h3>
+                  {FOOD_GUIDE.recipes.map((r,i) => {
+                    const colors = { great: 'border-emerald-700/50 bg-emerald-900/10', good: 'border-blue-700/50 bg-blue-900/10', modify: 'border-yellow-700/50 bg-yellow-900/10', avoid: 'border-red-700/50 bg-red-900/10' };
+                    const badges = { great: '✅', good: '👍', modify: '⚠️', avoid: '🚫' };
+                    return (
+                      <div key={i} className={`p-2 rounded-lg border ${colors[r.rating]} mb-1`}>
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-slate-200">{badges[r.rating]} {r.name}</span>
+                          <span className="text-[10px] text-slate-500 uppercase">{r.rating}</span>
+                        </div>
+                        <p className="text-[11px] text-slate-400 mt-0.5">{r.note}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* ═══ LABS TAB ═══ */}
+            {activeTab === 'labs' && (
+              <div className="space-y-3 fade-in">
+                <h2 className="font-bold">Labs & Medications</h2>
+
+                {/* Lab Retest */}
+                <div className="p-3 rounded-lg border border-orange-700/30 bg-orange-900/10">
+                  <p className="text-sm font-bold text-orange-400">🔬 Lab Retest: April 19, 2026 (Day 90)</p>
+                  <p className="text-xs text-slate-400 mt-1">Missing: HbA1c, Fasting Insulin, hs-CRP, Testosterone, Vitamin D</p>
+                </div>
+
+                {/* Lab Results */}
+                {LABS.map((cat, ci) => (
+                  <div key={ci} className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                    <h3 className="text-sm font-bold mb-2">{cat.cat}</h3>
+                    {cat.items.map((item, ii) => {
+                      const clr = item.status === 'high' ? 'text-red-400' : item.status === 'borderline' ? 'text-yellow-400' : item.status === 'good' ? 'text-emerald-400' : 'text-slate-500';
+                      return (
+                        <div key={ii} className="flex items-center justify-between text-xs py-1 border-b border-slate-700/30">
+                          <span className="text-slate-300">{item.name}</span>
+                          <div className="text-right">
+                            <span className={`font-bold ${clr}`}>{item.val}</span>
+                            {item.range && <span className="text-slate-600 ml-2">({item.range})</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+
+                {/* Meds */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <h3 className="text-sm font-bold mb-2">💊 Medications</h3>
+                  {MEDS.map((m,i) => (
+                    <div key={i} className="text-xs py-1 border-b border-slate-700/30">
+                      <span className="text-slate-200 font-medium">{m.name}</span>
+                      <span className="text-slate-500 ml-2">— {m.purpose}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Supplements */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <h3 className="text-sm font-bold mb-2">🌿 Supplements</h3>
+                  {SUPPLEMENTS.map((s,i) => (
+                    <p key={i} className="text-xs text-slate-300 py-0.5">{s}</p>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ═══ EXPORT TAB ═══ */}
+            {activeTab === 'export' && (
+              <div className="space-y-3 fade-in">
+                <h2 className="font-bold">Export & Sync</h2>
+
+                {/* Quick Export */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <h3 className="text-sm font-bold mb-3">📊 Export Data (CSV)</h3>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button onClick={() => { exportCSV(allDays, 'today'); setToast('Today exported'); }}
+                      className="bg-blue-600 hover:bg-blue-700 text-white text-xs py-2 rounded-lg">Today</button>
+                    <button onClick={() => { exportCSV(allDays, 'week'); setToast('Week exported'); }}
+                      className="bg-blue-600 hover:bg-blue-700 text-white text-xs py-2 rounded-lg">7 Days</button>
+                    <button onClick={() => { exportCSV(allDays, 'month'); setToast('Month exported'); }}
+                      className="bg-blue-600 hover:bg-blue-700 text-white text-xs py-2 rounded-lg">30 Days</button>
+                  </div>
+                </div>
+
+                {/* Doctor Report */}
+                <div className="p-3 rounded-lg border border-emerald-700/30 bg-emerald-900/10">
+                  <h3 className="text-sm font-bold mb-2">🩺 Doctor Report</h3>
+                  <p className="text-xs text-slate-400 mb-3">Generates a formatted report with vitals averages, compliance, and labs needed. Print or email to your PCP.</p>
+                  <button onClick={() => { exportDoctorReport(allDays); setToast('Doctor report downloaded'); }}
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 text-white text-sm py-2 rounded-lg">Generate Doctor Report</button>
+                </div>
+
+                {/* Cross-Device Sync */}
+                <div className="p-3 rounded-lg border border-purple-700/30 bg-purple-900/10">
+                  <h3 className="text-sm font-bold mb-2">🔄 Cross-Device Sync</h3>
+                  <p className="text-xs text-slate-400 mb-3">Export your data as JSON on one device, import on another. Your data stays yours — no cloud required.</p>
+                  <div className="grid grid-cols-2 gap-2 mb-3">
+                    <button onClick={() => { exportJSON(allDays); setToast('Data exported'); }}
+                      className="bg-purple-600 hover:bg-purple-700 text-white text-xs py-2 rounded-lg">Export All Data</button>
+                    <button onClick={() => setShowSync(!showSync)}
+                      className="bg-purple-600 hover:bg-purple-700 text-white text-xs py-2 rounded-lg">Import Data</button>
+                  </div>
+                  {showSync && (
+                    <div className="space-y-2">
+                      <textarea rows="4" placeholder="Paste exported JSON here..."
+                        value={syncText} onChange={e => setSyncText(e.target.value)}
+                        className="w-full text-xs" />
+                      <button onClick={() => {
+                        try {
+                          const imported = JSON.parse(syncText);
+                          const merged = { ...allDays };
+                          for (const [date, dayData] of Object.entries(imported)) {
+                            if (!merged[date]) {
+                              merged[date] = dayData;
+                            } else {
+                              // Merge: keep newer data
+                              const existing = merged[date];
+                              if (dayData.glucose.length > existing.glucose.length) merged[date] = dayData;
+                              else if (dayData.food.length > existing.food.length) merged[date] = dayData;
+                              else if (dayData.weight && !existing.weight) merged[date] = dayData;
+                            }
+                          }
+                          setAllDays(merged);
+                          setSyncText('');
+                          setShowSync(false);
+                          setToast(`Imported ${Object.keys(imported).length} days`);
+                        } catch(e) {
+                          setToast('Invalid JSON — check the data');
+                        }
+                      }} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white text-xs py-2 rounded-lg">
+                        Merge Imported Data
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Data Stats */}
+                <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
+                  <h3 className="text-sm font-bold mb-2">📈 Your Data</h3>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="text-slate-400">Days tracked:</div><div className="text-slate-200">{allDates.length}</div>
+                    <div className="text-slate-400">Glucose readings:</div><div className="text-slate-200">{Object.values(allDays).reduce((s,d)=>s+d.glucose.length,0)}</div>
+                    <div className="text-slate-400">BP readings:</div><div className="text-slate-200">{Object.values(allDays).reduce((s,d)=>s+d.bp.length,0)}</div>
+                    <div className="text-slate-400">Meals logged:</div><div className="text-slate-200">{Object.values(allDays).reduce((s,d)=>s+d.food.length,0)}</div>
+                    <div className="text-slate-400">Workouts:</div><div className="text-slate-200">{Object.values(allDays).filter(d=>d.checks.workout).length}</div>
+                  </div>
+                </div>
+
+                {/* Danger Zone */}
+                <div className="p-3 rounded-lg border border-red-700/30 bg-red-900/10">
+                  <h3 className="text-sm font-bold text-red-400 mb-2">⚠️ Reset</h3>
+                  <p className="text-xs text-slate-400 mb-2">Clear all data from this device. Export first!</p>
+                  <button onClick={() => {
+                    if (confirm('Are you sure? This deletes all data on this device. Export first!')) {
+                      setAllDays({});
+                      localStorage.removeItem(STORAGE_KEY);
+                      setToast('All data cleared');
+                    }
+                  }} className="bg-red-600/50 hover:bg-red-600 text-white text-xs py-2 px-4 rounded-lg">Clear All Data</button>
+                </div>
+              </div>
+            )}
+
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
