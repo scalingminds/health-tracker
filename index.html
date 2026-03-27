@@ -43,9 +43,49 @@
       return null;
     }
 
+    const WEBHOOK_URL = 'https://hook.us2.make.com/xj03jtntcv2ve2wo70gki5d4cvy50tao';
+
+    function syncToCloud(dayData) {
+      if (!dayData || !dayData.date) return;
+      const fastGluc = dayData.glucose && dayData.glucose.find(g => g.context === 'Fasting');
+      const avgGluc = dayData.glucose && dayData.glucose.length ? Math.round(dayData.glucose.reduce((s,g) => s + g.reading, 0) / dayData.glucose.length) : null;
+      const lastBp = dayData.bp && dayData.bp.length ? dayData.bp[dayData.bp.length - 1] : {};
+      const foods = dayData.food ? dayData.food.map(f => `${f.time}: ${f.entry}`).join(' | ') : '';
+      const payload = {
+        date: dayData.date,
+        weight: dayData.weight || null,
+        fastingGlucose: fastGluc ? fastGluc.reading : null,
+        avgGlucose: avgGluc,
+        systolic: lastBp.systolic || null,
+        diastolic: lastBp.diastolic || null,
+        water: dayData.water || 0,
+        sleepHours: dayData.sleep ? dayData.sleep.hours || null : null,
+        deepSleep: dayData.sleep ? dayData.sleep.deep || null : null,
+        cpap: dayData.sleep ? !!dayData.sleep.cpap : false,
+        alcohol: dayData.substances ? !!dayData.substances.alcohol : false,
+        cannabis: dayData.substances ? !!dayData.substances.cannabis : false,
+        lateSnack: dayData.substances ? !!dayData.substances.lateSnack : false,
+        workout: dayData.checks ? !!dayData.checks.workout : false,
+        dailyPT: dayData.checks ? !!dayData.checks.dailyPT : false,
+        mood: dayData.mood || '',
+        energy: dayData.energy || '',
+        foodLog: foods,
+        notes: dayData.notes || ''
+      };
+      fetch(WEBHOOK_URL, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+        mode: 'no-cors'
+      }).catch(e => console.warn('Sync failed', e));
+    }
+
     function saveData(data) {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        // Auto-sync current day to cloud
+        const today = todayKey();
+        if (data && data[today]) syncToCloud(data[today]);
       } catch(e) { console.warn('Save failed', e); }
     }
 
@@ -65,7 +105,7 @@
         substances: { alcohol: false, cannabis: false, lateSnack: false },
         checks: {
           morningWater: false, breakfast: false, amWalk: false, workout: false,
-          pmWalk: false, eveningWalk: false, windDown: false, cpap: false,
+          pmWalk: false, eveningWalk: false, windDown: false, cpap: false, dailyPT: false,
         },
         mood: '',
         energy: '',
@@ -225,7 +265,7 @@
         startDate = new Date(now); startDate.setDate(now.getDate() - 30);
       }
 
-      const headers = ['Date','Weight','Fasting Glucose','Avg Glucose','Systolic','Diastolic','Water (oz)','Sleep Hours','Deep Sleep','CPAP','Alcohol','Cannabis','Late Snack','Workout','Mood','Energy','Food Log','Notes'];
+      const headers = ['Date','Weight','Fasting Glucose','Avg Glucose','Systolic','Diastolic','Water (oz)','Sleep Hours','Deep Sleep','CPAP','Alcohol','Cannabis','Late Snack','Workout','Daily PT','Mood','Energy','Food Log','Notes'];
       const rows = [headers.join(',')];
 
       const dates = Object.keys(allDays).sort();
@@ -243,7 +283,7 @@
           day.sleep.hours, day.sleep.deep, day.sleep.cpap ? 'Yes' : 'No',
           day.substances.alcohol ? 'Yes' : 'No', day.substances.cannabis ? 'Yes' : 'No',
           day.substances.lateSnack ? 'Yes' : 'No',
-          day.checks.workout ? 'Yes' : 'No', day.mood, day.energy,
+          day.checks.workout ? 'Yes' : 'No', day.checks.dailyPT ? 'Yes' : 'No', day.mood, day.energy,
           `"${foods}"`, `"${day.notes || ''}"`
         ].join(','));
       }
@@ -293,7 +333,9 @@
       }
       report += `\n──────────────────────────────────────\n`;
       report += `LIFESTYLE COMPLIANCE\n\n`;
+      const ptDays = recent.filter(d => d.checks.dailyPT).length;
       report += `  Workouts: ${workoutDays}/${recent.length} days (${Math.round(workoutDays/recent.length*100)}%)\n`;
+      report += `  Daily PT: ${ptDays}/${recent.length} days (${Math.round(ptDays/recent.length*100)}%)\n`;
       report += `  CPAP: ${cpapDays}/${recent.length} nights (${Math.round(cpapDays/recent.length*100)}%)\n`;
       report += `  Alcohol: ${alcDays}/${recent.length} days\n`;
       report += `\n──────────────────────────────────────\n`;
@@ -305,6 +347,7 @@
       report += `  • Vitamin D level\n`;
       report += `  • Full lipid panel\n`;
       report += `  • Comprehensive metabolic panel\n`;
+      report += `  • Uric acid (big toe — gout rule-out)\n`;
 
       const blob = new Blob([report], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
@@ -467,6 +510,43 @@
                   </label>
                 </div>
 
+                {/* Daily PT / Shoulder Rehab — Dr. Sam Reeves */}
+                <div className="p-3 rounded-lg border border-teal-700/30 bg-teal-900/10">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg">🩹</span>
+                      <span className="font-bold text-sm">Daily PT — Shoulder & Mobility</span>
+                    </div>
+                    <span className="text-xs text-slate-400">~15 min</span>
+                  </div>
+                  <p className="text-[10px] text-teal-400 mb-2 italic">Dr. Sam Reeves — "This is medicine. Non-negotiable as a multivitamin."</p>
+                  <div className="space-y-1">
+                    {[
+                      {ex: 'Thoracic Extension (foam roller) — 1 min', note: '#1 drill for shoulder + neck'},
+                      {ex: 'Cat-Cow — 8-10 reps', note: 'Smooth, focus on thoracic movement'},
+                      {ex: 'Thread-the-Needle — 8 each side', note: 'Opens thoracic spine, releases traps'},
+                      {ex: 'Chin Tucks — 3×15', note: 'Resets cervical alignment'},
+                      {ex: 'Cervical Rotations — 8 each direction', note: 'Slow, no forcing'},
+                      {ex: 'Band Pull-Aparts — 3×15', note: 'Light band, rear delts + scapula'},
+                      {ex: 'Side-Lying External Rotation — 2×12', note: '2-3 lb, rotator cuff'},
+                      {ex: 'Scapular Wall Slides — 2×10', note: 'Back to wall, goalpost arms'},
+                      {ex: 'Big Toe Dorsiflexion Stretch — 15 reps (L)', note: 'Maintain MTP ROM'},
+                      {ex: 'Dead Bug — 3×8 (modified)', note: 'Core stability, stop if shoulder tweaks'},
+                    ].map((item, i) => (
+                      <div key={i} className="flex items-start gap-2 text-xs text-slate-300">
+                        <span className="text-teal-600 mt-0.5">•</span>
+                        <div><span>{item.ex}</span><span className="text-slate-600 ml-1">— {item.note}</span></div>
+                      </div>
+                    ))}
+                  </div>
+                  <label className="flex items-center gap-2 mt-3 cursor-pointer">
+                    <input type="checkbox" checked={day.checks.dailyPT || false}
+                      onChange={() => updateDay(currentDate, d => ({...d, checks: {...d.checks, dailyPT: !d.checks.dailyPT}}))}
+                      className="w-5 h-5 rounded" />
+                    <span className="text-sm font-bold text-teal-400">Mark PT Complete</span>
+                  </label>
+                </div>
+
                 {/* Quick Stats Row */}
                 <div className="grid grid-cols-3 gap-2">
                   <div className="p-2 rounded-lg border border-blue-700/30 bg-blue-900/10 text-center">
@@ -610,12 +690,42 @@
                 <div className="p-3 rounded-lg border border-slate-600/50 bg-slate-800/50">
                   <h3 className="text-sm font-bold mb-2">🍽️ Food Log</h3>
                   {day.food.map((f, i) => (
-                    <div key={i} className="text-xs py-1 border-b border-slate-700/50">
-                      <span className="text-slate-500">{f.time}</span> <span className="text-blue-400">[{f.meal}]</span> {f.entry}
+                    <div key={i} className="flex items-center gap-1 text-xs py-1 border-b border-slate-700/50">
+                      <input type="time" className="bg-transparent border border-slate-700 rounded px-1 py-0.5 text-slate-400 w-20 text-[11px]"
+                        value={(() => {
+                          const m = f.time.match(/(\d+):(\d+)\s*(AM|PM)/i);
+                          if (!m) return '';
+                          let h = parseInt(m[1]); const min = m[2]; const ap = m[3].toUpperCase();
+                          if (ap === 'PM' && h !== 12) h += 12;
+                          if (ap === 'AM' && h === 12) h = 0;
+                          return String(h).padStart(2,'0') + ':' + min;
+                        })()}
+                        onChange={e => {
+                          const v = e.target.value;
+                          if (!v) return;
+                          const [hh, mm] = v.split(':');
+                          let h = parseInt(hh); const ap = h >= 12 ? 'PM' : 'AM';
+                          if (h > 12) h -= 12; if (h === 0) h = 12;
+                          const newTime = h + ':' + mm + ' ' + ap;
+                          updateDay(currentDate, d => {
+                            const newFood = [...d.food];
+                            newFood[i] = {...newFood[i], time: newTime};
+                            return {...d, food: newFood};
+                          });
+                        }}
+                      />
+                      <span className="text-blue-400">[{f.meal}]</span>
+                      <span className="flex-1">{f.entry}</span>
+                      <button onClick={() => {
+                        updateDay(currentDate, d => ({...d, food: d.food.filter((_, j) => j !== i)}));
+                        setToast('Entry removed');
+                      }} className="text-red-500/50 hover:text-red-400 text-[10px] px-1">✕</button>
                     </div>
                   ))}
                   <div className="space-y-2 mt-2">
                     <div className="flex gap-2">
+                      <input type="time" id="food-time" className="w-20 text-xs"
+                        defaultValue={new Date().toTimeString().slice(0,5)} />
                       <select className="w-24" id="food-meal">
                         <option>Breakfast</option><option>Snack</option><option>Lunch</option><option>Dinner</option><option>Late Night</option>
                       </select>
@@ -624,8 +734,17 @@
                       <button id="food-add-btn" onClick={() => {
                         const entry = document.getElementById('food-input').value;
                         const meal = document.getElementById('food-meal').value;
+                        const timeVal = document.getElementById('food-time').value;
                         if (!entry.trim()) return;
-                        const time = new Date().toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit'});
+                        let time;
+                        if (timeVal) {
+                          const [hh, mm] = timeVal.split(':');
+                          let h = parseInt(hh); const ap = h >= 12 ? 'PM' : 'AM';
+                          if (h > 12) h -= 12; if (h === 0) h = 12;
+                          time = h + ':' + mm + ' ' + ap;
+                        } else {
+                          time = new Date().toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit'});
+                        }
                         updateDay(currentDate, d => ({...d, food: [...d.food, {time, meal, entry}]}));
                         document.getElementById('food-input').value = '';
                         setToast('Food logged');
